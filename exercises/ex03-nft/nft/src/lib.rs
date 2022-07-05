@@ -94,11 +94,54 @@ pub mod pallet {
 			metadata: BoundedVec<u8, T::MaxLength>,
 			supply: u128,
 		) -> DispatchResult {
+			let origin = ensure_signed(origin)?;
+
+			Self::ensure_have_positive_supply(supply)?;
+
+			let id = Self::nonce();
+			let details = UniqueAssetDetails::new(origin.clone(), metadata.clone(), supply);
+
+			UniqueAsset::<T>::insert(id, details);
+			Account::<T>::insert(id, origin.clone(), supply);
+			Nonce::<T>::set(id.saturating_add(1));
+
+			Self::deposit_event(Event::<T>::Created {
+				creator: origin,
+				asset_id: id,
+			});
+
 			Ok(())
 		}
 
 		#[pallet::weight(0)]
 		pub fn burn(origin: OriginFor<T>, asset_id: UniqueAssetId, amount: u128) -> DispatchResult {
+			// - Ensure the extrinsic origin is a signed transaction.
+			let origin = ensure_signed(origin)?;
+			Self::ensure_exists(asset_id)?;
+			Self::ensure_own_some(asset_id, origin.clone())?;
+			let mut total_supply = 0;
+			let mut burned_amount = 0;
+
+			UniqueAsset::<T>::try_mutate(asset_id, |maybe_details| -> DispatchResult {
+				let details = maybe_details.as_mut().ok_or(Error::<T>::Unknown)?;
+     			// - Mutate the account balance.
+				Account::<T>::mutate(asset_id, origin.clone(), |balance| {
+					let old_balance = *balance;
+					*balance = balance.saturating_sub(amount);
+					burned_amount = old_balance - *balance;
+				});
+				// - Mutate the total supply.
+				details.supply = details.supply - burned_amount;
+				total_supply = details.supply;
+				Ok(())
+			})?;
+
+			// - Emit a `Burned` event.
+			Self::deposit_event(Event::<T>::Burned {
+				asset_id,
+				owner: origin,
+				total_supply,
+			});
 			Ok(())
 		}
 
@@ -109,7 +152,53 @@ pub mod pallet {
 			amount: u128,
 			to: T::AccountId,
 		) -> DispatchResult {
+			// - Ensure the extrinsic origin is a signed transaction.
+			let origin = ensure_signed(origin)?;
+			Self::ensure_exists(asset_id)?;
+			Self::ensure_own_some(asset_id, origin.clone())?;
+			let mut transfered_amount = 0;
+			
+			UniqueAsset::<T>::try_mutate(asset_id, |maybe_details| -> DispatchResult {
+				let _details = maybe_details.as_mut().ok_or(Error::<T>::Unknown)?;
+     			// - Mutate both account balances.
+				Account::<T>::mutate(asset_id, origin.clone(), |balance| {
+					let old_balance = *balance;
+					*balance = balance.saturating_sub(amount);
+					transfered_amount = old_balance - *balance;
+				});
+				Account::<T>::mutate(asset_id, to.clone(), |balance| {
+					*balance = balance.saturating_add(transfered_amount);
+				});
+				Ok(())
+			})?;
+			// - Emit a `Transferred` event.
+
+			Self::deposit_event(Event::<T>::Transferred {
+				asset_id,
+				from: origin,
+				to,
+				amount,
+			});
 			Ok(())
 		}
 	}
+}
+
+
+impl<T: Config> Pallet<T> {
+	fn ensure_have_positive_supply(supply: u128) -> Result<(), Error<T>> {
+		ensure!(supply > 0, Error::<T>::NoSupply);
+		Ok(())
+	}
+
+	fn ensure_own_some(asset_id: UniqueAssetId, account: T::AccountId) -> Result<(), Error<T>> {
+		let owned = Self::account(asset_id, account);
+		ensure!(owned > 0, Error::<T>::NotOwned);
+		Ok(())
+	}
+
+	fn ensure_exists(asset_id: UniqueAssetId) -> Result<(), Error<T>> {
+		ensure!(Self::unique_asset(asset_id).is_some(), Error::<T>::Unknown);
+		Ok(())
+	} 
 }
